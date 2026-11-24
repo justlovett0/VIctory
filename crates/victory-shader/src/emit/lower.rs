@@ -236,6 +236,9 @@ struct Lower<'a> {
     /// Vertex and mesh outputs holding 16-bit values: row, whether two per
     /// dword, and the row packed after it.
     half_outputs: HashMap<u8, (bool, Option<u8>)>,
+    /// Pixel inputs holding 16-bit values: row, whether two per dword, and
+    /// the row packed after it.
+    half_inputs: HashMap<u8, (bool, Option<u8>)>,
     /// How lane masks become data.
     mask_data: MaskData,
     /// The instruction being lowered may read lane masks as data.
@@ -409,6 +412,60 @@ fn half_outputs(io: &StageIo, outputs: &[SigElement]) -> HashMap<u8, (bool, Opti
             (o.row, (o.pack2, b.map(|i| free.remove(i))))
         })
         .collect()
+}
+
+/// Pixel inputs of 16-bit values (see [`Lower::half_inputs`]): a packed row's
+/// partner is `row2` when distinct from `row`, else the next unlisted 16-bit
+/// row of the signature before the next `fp16` input row, taken in row order.
+fn half_inputs(io: &StageIo, inputs: &[SigElement]) -> HashMap<u8, (bool, Option<u8>)> {
+    let StageIo::Ps {
+        inputs: entries, ..
+    } = io
+    else {
+        return HashMap::new();
+    };
+    // Keep the first fp16 entry per row (matching the previous `.find()`
+    // behaviour) so duplicate rows neither overwrite earlier ones nor consume
+    // an extra free partner row.
+    let mut seen = HashSet::new();
+    let mut halves: Vec<_> = entries
+        .iter()
+        .filter(|i| i.fp16 && seen.insert(i.row))
+        .collect();
+    halves.sort_by_key(|i| i.row);
+    // In the console's PsInput table, `row2` repeats `row` when no distinct
+    // partner row is named; exclude both listed rows and explicitly claimed
+    // partners (`row2 != row`) from the fallback pool.
+    let mut free: Vec<u8> = inputs
+        .iter()
+        .filter(|e| e.half && e.kind == 0)
+        .filter_map(|e| u8::try_from(e.row?).ok())
+        .filter(|&r| {
+            !entries.iter().any(|i| i.row == r)
+                && !halves
+                    .iter()
+                    .any(|i| i.pack2 && i.row2 != i.row && i.row2 == r)
+        })
+        .collect();
+    free.sort_unstable();
+    free.dedup();
+    let mut out = HashMap::with_capacity(halves.len());
+    for (idx, i) in halves.iter().enumerate() {
+        let next_fp16 = halves.get(idx + 1).map_or(u8::MAX, |n| n.row);
+        // Only take a fallback partner before the next fp16 input row so an
+        // earlier unpaired input cannot steal a later fp16 input's partner.
+        let b = if !i.pack2 {
+            None
+        } else if i.row2 != i.row {
+            Some(i.row2)
+        } else {
+            free.iter()
+                .position(|&r| r > i.row && r < next_fp16)
+                .map(|p| free.remove(p))
+        };
+        out.insert(i.row, (i.pack2, b));
+    }
+    out
 }
 
 fn unsupported(offset: usize, what: Why) -> Stop {
@@ -1182,6 +1239,7 @@ impl<'a> Lower<'a> {
             flat: None,
             no_barrier,
             half_outputs: half_outputs(&x.native.io, &x.outputs),
+            half_inputs: half_inputs(&x.native.io, &x.inputs),
             mask_data: match x.native.stage {
                 HwStage::Cs => MaskData::Console,
                 HwStage::Ps | HwStage::Vs => MaskData::Host,
@@ -7185,13 +7243,7 @@ impl<'a> Lower<'a> {
                 _ => Err("an input"),
             }
         };
-        let packing = match &self.x.native.io {
-            StageIo::Ps { inputs, .. } => inputs
-                .iter()
-                .find(|i| i.row == attribute.row && i.fp16)
-                .map(|i| (i.pack2, (i.row2 != i.row).then_some(i.row2))),
-            _ => None,
-        };
+        let packing = self.half_inputs.get(&attribute.row).copied();
         let f16 = inst.name().ends_with("_f16");
         let x = match packing {
             None if f16 || attribute.high => return Err("a 16-bit read of a 32-bit input"),
