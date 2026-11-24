@@ -352,12 +352,21 @@ impl State {
             return false;
         };
         if p.compute || p.mesh != mesh {
-            once!(mesh, "a draw or mesh dispatch with another kind of pipeline");
+            once!(
+                mesh,
+                "a draw or mesh dispatch with another kind of pipeline"
+            );
             return false;
         }
         if !self.bind(list, p, false) {
             return false;
         }
+<<<<<<< HEAD
+        if !self.bind(list, p, false) {
+            return false;
+        }
+=======
+>>>>>>> pr-193-latest
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -416,8 +425,11 @@ impl State {
     /// What draws and dispatches share: heaps, our root signature, the
     /// pipeline, and per stage the user data, root views and the
     /// descriptors its tables hold.
+<<<<<<< HEAD
     /// False if the draw or dispatch must not run: a table it reads could
     /// not be made.
+=======
+>>>>>>> pr-193-latest
     fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         let l = &list.list;
         // Heaps first: a root signature with directly indexed heaps must be
@@ -521,8 +533,28 @@ impl State {
                     }
                 }
             }
+            if let Some(param) = stage.stride_table {
+                let gpu = (self.heaps[0] != 0)
+                    .then(|| crate::descriptor::heap(self.heaps[0] as This).host())
+                    .flatten()
+                    .and_then(|h| h.stride_table_gpu());
+                if let Some(gpu) = gpu {
+                    // SAFETY: an open list; the stride table buffer lives with the host heap.
+                    unsafe {
+                        if compute {
+                            l.SetComputeRootShaderResourceView(param, gpu);
+                        } else {
+                            l.SetGraphicsRootShaderResourceView(param, gpu);
+                        }
+                    }
+                } else {
+                    once!("a shader reads the runtime stride table without a host view heap");
+                    return false;
+                }
+            }
         }
         true
+<<<<<<< HEAD
     }
 
     /// Binds the title's root SRV `slot` as the one-view table `param` (see
@@ -587,6 +619,8 @@ impl State {
                 l.SetGraphicsRootDescriptorTable(param, table);
             }
         }
+=======
+>>>>>>> pr-193-latest
     }
 
     /// Runs a dispatch on the host.
@@ -612,7 +646,10 @@ impl State {
             return;
         }
         if !self.bind(list, p, true) {
+<<<<<<< HEAD
             DROPPED.fetch_add(1, Ordering::Relaxed);
+=======
+>>>>>>> pr-193-latest
             return;
         }
         #[cfg(feature = "diagnostics")]
@@ -1105,13 +1142,19 @@ impl State {
             #[cfg(feature = "diagnostics")]
             match crate::pipeline::host_pipeline(self.pipeline as This) {
                 None => crate::pipeline::note_drop(self.pipeline as This),
-                Some(p) => why(&format!("prepare failed (compute {}, mesh {})", p.compute, p.mesh)),
+                Some(p) => why(&format!(
+                    "prepare failed (compute {}, mesh {})",
+                    p.compute, p.mesh
+                )),
             }
             return false;
         }
         #[cfg(feature = "diagnostics")]
         list.note_op(|| {
-            self.op_text(format!("indirect kind {kind} max {max} at {arguments:#x}"), kind == DISPATCH)
+            self.op_text(
+                format!("indirect kind {kind} max {max} at {arguments:#x}"),
+                kind == DISPATCH,
+            )
         });
         // SAFETY: an open list with everything set; the buffers are host
         // copies the list keeps alive (refresh), the signature is cached.
@@ -1228,7 +1271,10 @@ fn describe(view: Option<&View>) -> String {
         crate::resource::host_resource(r).map(|t| {
             // SAFETY: a live resource.
             let d = unsafe { t.GetDesc() };
-            format!("{}x{} f{} flags {:#x}", d.Width, d.Height, d.Format.0, d.Flags.0)
+            format!(
+                "{}x{} f{} flags {:#x}",
+                d.Width, d.Height, d.Format.0, d.Flags.0
+            )
         })
     };
     match view {
