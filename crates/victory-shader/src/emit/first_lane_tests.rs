@@ -54,6 +54,7 @@ fn build(words: &[u32]) -> HostShader {
         outputs: Vec::new(),
         prims: Vec::new(),
         mesh_stride: 0,
+        options: super::TranslateOptions::default(),
     })
     .expect("lower");
     let shader = HostShader {
@@ -64,6 +65,7 @@ fn build(words: &[u32]) -> HostShader {
         static_samplers: Vec::new(),
         root_cbvs: lowered.root_cbvs,
         root_srvs: lowered.root_srvs,
+        stride_table: lowered.stride_table,
     };
     if let Ok(mut v) = validator::Validator::load(validator::Validator::default_path().as_deref()) {
         v.validate(&mut shader.dxil.clone())

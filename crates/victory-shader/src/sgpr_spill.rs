@@ -337,9 +337,9 @@ mod tests {
         if fwd {
             forward(&mut p);
         }
-        let res = resource::track(&p, &native.layout, native.stage)?;
-        let io = io::raise(&p, &native)?;
         let st = structure::structure(&p)?;
+        let res = resource::track(&p, &native.layout, native.stage, Some(&st))?;
+        let io = io::raise(&p, &native)?;
         let container = crate::dxbc::build(&[]);
         let c = Container::parse(&container).unwrap();
         crate::emit::emit(&c, &native, &p, &st, &io, &res).map(|_| ())
