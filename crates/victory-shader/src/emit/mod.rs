@@ -217,7 +217,8 @@ pub fn translate(container: &[u8]) -> Result<HostShader, ShaderError> {
             .layout
             .iter()
             .all(|r| native.stage.user_sgpr(r.user_data) >= 16);
-    let p = ir::build_with(&native.patched_code(), native.wave64, native.vgprs, spilled)?;
+    let mut p = ir::build_with(&native.patched_code(), native.wave64, native.vgprs, spilled)?;
+    crate::sgpr_spill::forward(&mut p);
     // Structurisation first: tracing per-lane descriptors needs it (its
     // failure is reported after the earlier stages').
     let st = structure::structure(&p);

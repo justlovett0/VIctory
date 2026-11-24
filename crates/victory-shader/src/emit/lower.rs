@@ -151,6 +151,9 @@ fn half_shift(width: u32) -> u32 {
 struct Lower<'a> {
     s: Shader,
     x: &'a Parts<'a>,
+    /// SGPR spills to VGPR lanes and their reloads that nothing reads any
+    /// more (see [`crate::sgpr_spill`]): not lowered.
+    dead: HashSet<Site>,
     bad: &'a HashMap<Value, Why>,
     lane_fail: HashMap<Value, Why>,
     vals: HashMap<Value, Val>,
@@ -206,6 +209,9 @@ struct Lower<'a> {
     mask_ok: bool,
     /// Ballots of masks read as data, by low dword: (low, high).
     ballots: HashMap<Value, (V, V)>,
+    /// SCC of a scalar mask operation ("some lane is set"), with the low
+    /// dword of the mask it tests: read as data, the ballot is not zero.
+    mask_scc: HashMap<Value, Value>,
     /// Masks whose ballot is being built: a mask whose lane bit needs its
     /// own value as a number (an opaque mask keyed by a dword it shares
     /// with another) would otherwise recurse until the stack overflows.
@@ -292,6 +298,32 @@ fn reads_mask_as_data(st: &Structured, i: &Inst) -> bool {
     })
 }
 
+/// SCC of each scalar operation writing a tracked lane mask, with the
+/// mask's low dword (EXEC's new value for the `saveexec` forms).
+fn mask_sccs(st: &Structured, p: &crate::ir::Program) -> HashMap<Value, Value> {
+    let mut out = HashMap::new();
+    for inst in p.blocks.iter().flat_map(|b| &b.insts) {
+        let Fields::Sop { dst, .. } = &inst.fields else {
+            continue;
+        };
+        let Some(scc) = inst.write(Reg::Scc) else {
+            continue;
+        };
+        let lo = if inst.name().contains("saveexec") {
+            inst.write(Reg::S(EXEC))
+        } else {
+            match *dst {
+                Some(Operand::Scalar { code, .. }) => inst.write(Reg::S(code)),
+                _ => None,
+            }
+        };
+        if let Some(lo) = lo.filter(|lo| st.masks.contains_key(lo)) {
+            out.insert(scc, lo);
+        }
+    }
+    out
+}
+
 /// Where half `h` (dword h / 2, the high half when odd) of a parameter
 /// packing 16-bit rows `a` and `b` two per dword comes from: a row and
 /// channel of `elements`, none for padding. Channel c of `a` is half c;
@@ -363,6 +395,7 @@ impl<'a> Lower<'a> {
         s.inputs = x.inputs.clone();
         s.outputs = x.outputs.clone();
         let insts = || p.blocks.iter().flat_map(|b| &b.insts);
+        let dead = crate::sgpr_spill::dead(p);
         let writes_uavs = insts().any(|i| {
             matches!(i.fields, Fields::Image { .. } | Fields::Buffer { .. })
                 && (i.name().contains("store") || i.name().contains("atomic"))
@@ -374,7 +407,16 @@ impl<'a> Lower<'a> {
             // Code reading other lanes needs the console's wave size and
             // lane order; so do lane masks read as numbers, and LDS shared
             // within one wave, where the console compiler leaves out barriers.
-            console_lanes = insts().any(|i| {
+            let mut live = p.blocks.iter().enumerate().flat_map(|(b, block)| {
+                let dead = &dead;
+                block
+                    .insts
+                    .iter()
+                    .enumerate()
+                    .filter(move |&(i, _)| !dead.contains(&(b, i)))
+                    .map(|(_, inst)| inst)
+            });
+            console_lanes = live.any(|i| {
                 let n = i.name();
                 n.starts_with("ds_swizzle")
                     || n.contains("permute")
@@ -505,6 +547,7 @@ impl<'a> Lower<'a> {
             },
             mask_ok: false,
             ballots: HashMap::new(),
+            mask_scc: mask_sccs(x.st, p),
             balloting: HashSet::new(),
             def_block: p
                 .blocks
@@ -525,6 +568,7 @@ impl<'a> Lower<'a> {
             counters: HashMap::new(),
             abort: None,
             ret: None,
+            dead,
         }
     }
 
@@ -704,6 +748,9 @@ impl<'a> Lower<'a> {
                     .extend(phi.args.iter().filter(|a| inside.contains_key(a)));
             }
             for (i, inst) in block.insts.iter().enumerate() {
+                if self.dead.contains(&(b, i)) {
+                    continue;
+                }
                 for &(_, r) in &inst.reads {
                     if let Some(&(sb, start, end)) = inside.get(&r)
                         && !(sb == b && i > start && i < end)
@@ -1132,6 +1179,10 @@ impl<'a> Lower<'a> {
             Some(&Val::Missing(_)) | None if self.mask_ok && is_mask => {
                 return self.mask_dword(v).map(Val::I32);
             }
+            Some(&Val::Missing(_)) if self.mask_ok && self.mask_scc.contains_key(&v) => {
+                let lo = self.mask_scc[&v];
+                return self.mask_any(lo).map(Val::Bit);
+            }
             Some(&Val::Missing(w)) => return Err(w),
             Some(&val) => return Ok(val),
             None => {}
@@ -1230,6 +1281,21 @@ impl<'a> Lower<'a> {
             }
         };
         Ok(if high { y } else { x })
+    }
+
+    /// Whether some lane of the mask with low dword `lo` is set, as data
+    /// (SCC of the operation writing it): its ballot is not zero.
+    fn mask_any(&mut self, lo: Value) -> Result<V, Why> {
+        let x = self.mask_dword(lo)?;
+        let (_, y) = self.ballots[&lo];
+        let c = self.cur;
+        let any = if self.x.p.wave64 {
+            self.s.m.bin(c, Bin::Or, x, y)
+        } else {
+            x
+        };
+        let z = self.s.m.i32(0);
+        Ok(self.s.m.cmp(c, pred::NE, any, z))
     }
 
     // ---- operands ----
@@ -2264,6 +2330,13 @@ impl<'a> Lower<'a> {
 
     fn inst(&mut self, b: usize, i: usize) -> Result<(), Stop> {
         let inst: &'a Inst = &self.x.p.blocks[b].insts[i];
+        if self.dead.contains(&(b, i)) {
+            for &(_, v) in &inst.writes {
+                self.vals
+                    .insert(v, Val::Missing("a spilled SGPR's lane read as data"));
+            }
+            return Ok(());
+        }
         let offset = inst.machine.offset;
         let name = inst.name();
         self.mask_ok = match self.mask_data {
