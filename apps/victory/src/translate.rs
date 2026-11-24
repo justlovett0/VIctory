@@ -329,7 +329,11 @@ fn translate(
     };
     for p in programs {
         t.programs += 1;
-        match ir::build(&p.patched_code(), p.wave64, p.vgprs) {
+        // The same spill-table rewrite the runtime path applies (emit::translate_for).
+        let spilled = p.stage == HwStage::Cs
+            && !p.layout.is_empty()
+            && p.layout.iter().all(|r| p.stage.user_sgpr(r.user_data) >= 16);
+        match ir::build_with(&p.patched_code(), p.wave64, p.vgprs, spilled) {
             Ok(program) => {
                 t.translated += 1;
                 t.instructions += program.blocks.iter().map(|b| b.insts.len()).sum::<usize>();
