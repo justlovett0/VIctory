@@ -293,11 +293,21 @@ pub fn emit_with(
     let mut inputs = sig(FourCC::ISG1)?;
     let mut outputs = sig(FourCC::OSG1)?;
     // Interpolation as DXC declares it by default; pixel inputs that are
-    // read get the mode their barycentrics say.
+    // read get the mode their barycentrics say. Conservative depth outputs
+    // (`SV_DepthGreaterEqual`/`SV_DepthLessEqual`, kinds 18/19) require
+    // `SV_Position` to use `linear_noperspective_centroid` (5) rather than
+    // `linear_noperspective` (4) unless the shader runs at sample frequency.
+    let conservative_depth = pixel && outputs.iter().any(|o| matches!(o.kind, 18 | 19));
     let interpolated = if pixel { &mut inputs } else { &mut outputs };
-    for e in interpolated {
+    for e in interpolated.iter_mut() {
         e.interp = match (e.kind, e.comp) {
-            (3, _) => 4,
+            (3, _) => {
+                if conservative_depth {
+                    5
+                } else {
+                    4
+                }
+            }
             // Constant, as DXC declares it (the AMD compiler crashed on a
             // front face without a mode).
             (13, _) => 1,
@@ -306,13 +316,7 @@ pub fn emit_with(
             _ => 0,
         };
     }
-    // With a conservative depth output (SV_DepthLessEqual, GreaterEqual) DXIL
-    // wants the position centroid (or per sample), as DXC declares it then.
-    if pixel && outputs.iter().any(|e| matches!(e.kind, 18 | 19)) {
-        for e in inputs.iter_mut().filter(|e| e.kind == 3) {
-            e.interp = 5;
-        }
-    }
+    harmonize_row_interp(interpolated);
     // Per-primitive outputs are constant. The console never exports a
     // primitive id or cull flag a mesh shader writes (it culls with the
     // primitive export), so those rows are left out.
@@ -371,6 +375,37 @@ pub fn emit_with(
         root_srvs: l.root_srvs,
         stride_table: l.stride_table,
     })
+}
+
+/// DXIL requires every signature element packed into the same row to share an
+/// interpolation mode. Integer attributes and `SV_IsFrontFace` can only be
+/// `Constant` (1), so any float sibling packed into their row must be `1` as
+/// well; after pixel-shader lowering, unread siblings also inherit the actual
+/// interpolation mode of a read element in the same row.
+pub(super) fn harmonize_row_interp(elements: &mut [container::SigElement]) {
+    let mut rows: Vec<u32> = elements.iter().filter_map(|e| e.row).collect();
+    rows.sort_unstable();
+    rows.dedup();
+    for row in rows {
+        let forced_constant = elements
+            .iter()
+            .any(|e| e.row == Some(row) && (e.kind == 13 || (e.kind == 0 && e.comp != 9)));
+        let mode = if forced_constant {
+            Some(1)
+        } else {
+            elements
+                .iter()
+                .find(|e| e.row == Some(row) && e.usage != 0 && e.interp != 0)
+                .map(|e| e.interp)
+        };
+        if let Some(m) = mode {
+            for e in elements.iter_mut() {
+                if e.row == Some(row) && e.interp != 0 && e.usage == 0 {
+                    e.interp = m;
+                }
+            }
+        }
+    }
 }
 
 /// The rows of an `ISG1`/`OSG1` part.
