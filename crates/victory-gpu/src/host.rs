@@ -360,6 +360,10 @@ struct Scratch {
     chunks: Vec<(ID3D12Resource, usize, u64)>,
     current: usize,
     used: u64,
+    /// Element-aligned copies of title bytes made for this list, by
+    /// (source, length, alignment): every draw reading the same view range
+    /// shares one copy instead of making its own.
+    copies: std::collections::HashMap<(u64, u64, u64), (ID3D12Resource, u64)>,
 }
 
 // SAFETY: the chunk pointers are persistent mappings of upload buffers.
@@ -903,6 +907,7 @@ impl HostList {
         {
             let mut scratch = self.scratch.lock().unwrap_or_else(|e| e.into_inner());
             (scratch.current, scratch.used) = (0, 0);
+            scratch.copies.clear();
         }
         // SAFETY: the list is not executing.
         let reset = unsafe {
@@ -1107,6 +1112,26 @@ impl HostList {
     ) -> Option<(ID3D12Resource, u64, *mut u8)> {
         let (buf, at, _, data) = self.scratch_in(len.max(1), align.max(1))?;
         Some((buf, at, data))
+    }
+
+    /// An element-aligned copy of `len` title bytes at `src`, filled at
+    /// submission and shared by every use in this list until it is reset:
+    /// the host buffer and the copy's byte offset in it.
+    pub(crate) fn aligned_copy(
+        &self,
+        src: u64,
+        len: u64,
+        align: u64,
+    ) -> Option<(ID3D12Resource, u64)> {
+        let key = (src, len, align);
+        let scratch = || self.scratch.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = scratch().copies.get(&key) {
+            return Some(hit.clone());
+        }
+        let (buf, at, to) = self.scratch_aligned(len, align)?;
+        self.defer_fill(to, src as *const u8, len as usize);
+        scratch().copies.insert(key, (buf.clone(), at));
+        Some((buf, at))
     }
 
     fn scratch_in(&self, len: u64, align: u64) -> Option<(ID3D12Resource, u64, u64, *mut u8)> {

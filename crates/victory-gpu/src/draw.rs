@@ -854,8 +854,7 @@ impl State {
                         if let Some((src, len, align, mut desc)) =
                             crate::descriptor::host::unaligned_srv(&view)
                         {
-                            if let Some((buf, at, to)) = list.scratch_aligned(len, align) {
-                                list.defer_fill(to, src as *const u8, len as usize);
+                            if let Some((buf, at)) = list.aligned_copy(src, len, align) {
                                 desc.Anonymous.Buffer.FirstElement = at / align;
                                 host.srv_at(index, &buf, &desc);
                             } else {
