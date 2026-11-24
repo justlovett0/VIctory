@@ -4522,6 +4522,11 @@ impl<'a> Lower<'a> {
                         w.push((1, v));
                     }
                 }
+                // WORD3: DST_SEL identity (X/Y/Z/W = 4/5/6/7 = 0xFAC), the host
+                // view's component order; INDEX_STRIDE/ADD_TID_ENABLE are 0 for
+                // a normal (non-swizzled) buffer.
+                let d3 = self.s.m.i32(0xFAC);
+                w.push((3, d3));
                 w
             }
         };
