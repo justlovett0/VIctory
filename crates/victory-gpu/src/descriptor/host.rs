@@ -479,9 +479,9 @@ impl HostHeap {
             && index < t.len
         {
             // SAFETY: `t.ptr` points to a live mapped UPLOAD buffer of
-            // `t.len` entries of two dwords.
+            // `t.len` entries of three dwords.
             unsafe {
-                (t.ptr as *mut [u32; 2])
+                (t.ptr as *mut [u32; 3])
                     .add(index as usize)
                     .write(entry.words());
             }
@@ -710,12 +710,14 @@ impl HostHeap {
             return self.forget_view(index);
         };
         let stride = view_stride(view);
+        let format = view_format(view);
         let entry = match viewed_bytes(view, kept.as_ref()) {
             // Not a buffer view, or a raw one: the slot's own view.
             Viewed::Own => {
                 self.unalias(index);
                 StrideEntry {
                     stride,
+                    format,
                     ..StrideEntry::default()
                 }
             }
@@ -728,6 +730,7 @@ impl HostHeap {
                 let (raw_slot, bias) = self.alias(index, &buffer, start, len, unordered);
                 StrideEntry {
                     stride,
+                    format,
                     raw_slot: Some(raw_slot),
                     bias,
                 }
@@ -737,6 +740,7 @@ impl HostHeap {
                 self.unalias(index);
                 StrideEntry {
                     stride,
+                    format,
                     raw_slot: Some(self.null_alias(view_is_unordered(view))),
                     bias: 0,
                 }
@@ -747,11 +751,11 @@ impl HostHeap {
 
     /// Slot `index`'s runtime stride table entry, as shaders read it.
     #[cfg(test)]
-    pub(crate) fn entry_words(&self, index: u32) -> [u32; 2] {
+    pub(crate) fn entry_words(&self, index: u32) -> [u32; 3] {
         let t = self.strides.as_ref().expect("a view heap's table");
         assert!(index < t.len);
         // SAFETY: as in `set_entry`.
-        unsafe { (t.ptr as *const [u32; 2]).add(index as usize).read() }
+        unsafe { (t.ptr as *const [u32; 3]).add(index as usize).read() }
     }
 
     /// The first slot of the raw view pool.
@@ -978,6 +982,54 @@ fn view_stride(view: &View) -> u32 {
         _ => 0,
     };
     u32::try_from(bytes).unwrap_or(0)
+}
+
+/// GFX10 format code of the view in the slot (0: not a typed image, or an
+/// unmapped format). The console compiler reads an image descriptor's format
+/// back as data; the host view's DXGI format maps to the console's code.
+fn view_format(view: &View) -> u32 {
+    let dxgi = match view {
+        View::Shader(_, Some(desc)) => srv_desc(desc).Format.0 as u32,
+        View::Placed(false, resource, desc) if resource[0] == 1 => desc[..10]
+            .try_into()
+            .ok()
+            .map_or(0, |w: &[u32; 10]| srv_desc(w).Format.0 as u32),
+        View::Unordered(_, _, Some(desc)) => uav_desc(desc).Format.0 as u32,
+        View::Placed(true, resource, desc) if resource[0] == 1 => desc[..10]
+            .try_into()
+            .ok()
+            .map_or(0, |w: &[u32; 10]| uav_desc(w).Format.0 as u32),
+        _ => 0,
+    };
+    gfx10_format(dxgi)
+}
+
+/// DXGI format -> GFX10 `SQ_IMG_RSRC_WORD1` FORMAT code (bits [28:20]).
+/// Codes per Mesa/Leonida `gfx10_formats`. sRGB shares its linear code (the
+/// console compiler reads the layout, not the gamma). 0: unmapped.
+fn gfx10_format(dxgi: u32) -> u32 {
+    match dxgi {
+        2 => 77,                       // R32G32B32A32_FLOAT
+        10 => 71,                      // R16G16B16A16_FLOAT
+        11 => 65,                      // R16G16B16A16_UNORM
+        16 => 64,                      // R32G32_FLOAT
+        24 => 44,                      // R10G10B10A2_UNORM
+        27 => 43,                      // R11G11B10_FLOAT
+        28 | 29 | 87 | 91 | 90 => 56,  // R8G8B8A8 / B8G8R8A8 / B8G8R8X8 UNORM
+        34 => 67,                      // R16G16_FLOAT
+        41 => 22,                      // R32_FLOAT
+        49 => 14,                      // R8G8_UNORM
+        56 => 13,                      // R16_FLOAT
+        61 => 1,                       // R8_UNORM
+        62 => 5,                       // R8_UINT
+        85 => 133,                     // B5G6R5_UNORM
+        86 => 135,                     // B5G5R5A1_UNORM
+        115 => 136,                    // B4G4R4A4_UNORM
+        71 | 72 => 169,                // BC1_UNORM
+        77 | 78 => 173,                // BC3_UNORM
+        98 | 99 => 181,                // BC7_UNORM
+        _ => 0,
+    }
 }
 
 /// [`buffer_range`] of an unordered access view of memory at `base`.

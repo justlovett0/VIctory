@@ -4500,6 +4500,16 @@ impl<'a> Lower<'a> {
                     k(self, 0x3FFF),
                 );
                 let d1 = self.s.m.bin(c, Bin::Shl, w, k30);
+                // The format lives in WORD1 bits [28:20]; the console compiler
+                // reads it back as data. Take it from the host view's format
+                // (runtime table); 0 when the slot is not traced.
+                let fmt = match self.format_entry(&src) {
+                    Ok(f) => f,
+                    Err(_) => self.s.m.i32(0),
+                };
+                let k20 = k(self, 20);
+                let fmt = self.s.m.bin(c, Bin::Shl, fmt, k20);
+                let d1 = self.s.m.bin(c, Bin::Or, d1, fmt);
                 let hi = self.s.m.bin(c, Bin::LShr, w, k2);
                 let hi = self.s.m.bin(c, Bin::And, hi, mask);
                 let ht = self.s.m.bin(c, Bin::Shl, height, k14);
@@ -4508,7 +4518,18 @@ impl<'a> Lower<'a> {
                 let base = k(self, 0xFAC | ty << 28);
                 let last = self.s.m.bin(c, Bin::Shl, levels, k16);
                 let d3 = self.s.m.bin(c, Bin::Or, base, last);
-                vec![(1, d1), (2, d2), (3, d3), (4, depth)]
+                // WORD5-7 are reserved for a 2D image (0); the compiler reads
+                // them as data too.
+                let zero = self.s.m.i32(0);
+                vec![
+                    (1, d1),
+                    (2, d2),
+                    (3, d3),
+                    (4, depth),
+                    (5, zero),
+                    (6, zero),
+                    (7, zero),
+                ]
             }
             None => {
                 let mut w = vec![(2, field(self, 0))];
@@ -5112,6 +5133,35 @@ impl<'a> Lower<'a> {
             self.entries.insert(k, e);
         }
         Ok(e)
+    }
+
+    /// The GFX10 format code of the image view in `src`'s heap slot: the third
+    /// dword of its runtime table entry ([`super::StrideEntry::format`]), read
+    /// in the current block. The console compiler reads an image descriptor's
+    /// format back as data; the host view's format is the source.
+    fn format_entry(&mut self, src: &Source) -> Result<V, Why> {
+        let slot = self
+            .heap_slot(src, false)
+            .map_err(|_| "a descriptor format")?;
+        let c = self.cur;
+        let table = self.s.stride_table_handle();
+        let bytes = self.s.m.i32(super::StrideEntry::BYTES);
+        let addr = self.s.m.bin(c, Bin::Mul, slot, bytes);
+        let eight = self.s.m.i32(8);
+        let addr = self.s.m.bin(c, Bin::Add, addr, eight);
+        let iu = self.s.m.undef(self.s.t.i32);
+        let mask = self.s.m.i8(1);
+        let align = self.s.m.i32(4);
+        let res = self.s.op(
+            c,
+            "rawBufferLoad.f32",
+            Attr::ReadOnly,
+            self.s.t.res_ret,
+            139,
+            &[table, addr, iu, mask, align],
+        );
+        let fmt = self.s.m.extract(c, res, 0);
+        Ok(self.as_int(fmt))
     }
 
     /// The raw handle (`props`: 11, with the UAV bit for one written) and

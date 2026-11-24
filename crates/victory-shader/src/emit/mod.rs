@@ -1089,6 +1089,7 @@ mod tests {
                 stride,
                 raw_slot: Some(raw_slot),
                 bias: window.bias,
+                format: 0,
             },
         )
     }
@@ -1453,19 +1454,21 @@ mod tests {
     fn stride_entries_name_the_raw_view_and_its_bias() {
         use super::{RawWindow, StrideEntry};
         // No raw slot: the slot's own view, whatever the table held before.
-        assert_eq!(StrideEntry::default().words(), [0, 0]);
+        assert_eq!(StrideEntry::default().words(), [0, 0, 0]);
         let own = StrideEntry {
             stride: 4,
             raw_slot: None,
             bias: 0,
+            format: 0,
         };
-        assert_eq!(own.words(), [4, 0]);
+        assert_eq!(own.words(), [4, 0, 0]);
         let aliased = StrideEntry {
             stride: 12,
             raw_slot: Some(0),
             bias: 12,
+            format: 0,
         };
-        assert_eq!(aliased.words(), [12, 1 | 12 << 28]);
+        assert_eq!(aliased.words(), [12, 1 | 12 << 28, 0]);
         // A view on 16 bytes starts its raw view; one 4 to 12 bytes past
         // starts it early, and the raw view covers the bytes before too.
         let window = |first, dwords, bias| {

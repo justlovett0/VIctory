@@ -34,24 +34,28 @@ pub struct StrideEntry {
     /// Bytes from the start of that raw view to the slot's view's first
     /// byte: a multiple of 4 below 16 ([`RawWindow`]).
     pub bias: u32,
+    /// GFX10 format code of an image view in the slot (0: not an image, or
+    /// unknown). The console compiler reads an image descriptor's format back
+    /// as data (WORD1 bits [28:20]); the host view's format is the source.
+    pub format: u32,
 }
 
 impl StrideEntry {
     /// Bytes per entry in the table: slot `i`'s entry is at `i * BYTES`.
-    pub const BYTES: u32 = 8;
+    pub const BYTES: u32 = 12;
     /// The raw slots an entry can name.
     pub const RAW_SLOTS: u32 = (1 << 28) - 1;
 
     /// The entry as the shader reads it: the stride, then the raw slot plus
-    /// one in the low 28 bits (0: the slot itself) under the bias. A table
-    /// of zeros sends every slot to itself.
-    pub fn words(self) -> [u32; 2] {
+    /// one in the low 28 bits (0: the slot itself) under the bias, then the
+    /// image format code. A table of zeros sends every slot to itself.
+    pub fn words(self) -> [u32; 3] {
         debug_assert!(self.bias < 16);
         let raw = self.raw_slot.map_or(0, |s| {
             debug_assert!(s < Self::RAW_SLOTS);
             s + 1
         });
-        [self.stride, raw | self.bias << 28]
+        [self.stride, raw | self.bias << 28, self.format]
     }
 }
 

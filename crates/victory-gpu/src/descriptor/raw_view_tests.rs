@@ -299,18 +299,19 @@ fn unknown_stride_reads_reach_the_bytes_of_the_view_in_the_slot() {
     // after the heap's two null raw views, 4 bytes early where the view
     // does not start on 16 bytes.
     let pool = heap.alias_base() + 2;
-    let entry = |stride, raw_slot, bias| {
+    let entry = |stride, raw_slot, bias, format| {
         StrideEntry {
             stride,
             raw_slot,
             bias,
+            format,
         }
         .words()
     };
-    assert_eq!(heap.entry_words(0), entry(4, None, 0));
-    assert_eq!(heap.entry_words(1), entry(4, Some(pool), 4));
-    assert_eq!(heap.entry_words(2), entry(12, Some(pool + 1), 4));
-    assert_eq!(heap.entry_words(3), entry(16, Some(pool + 2), 0));
+    assert_eq!(heap.entry_words(0), entry(4, None, 0, 0));
+    assert_eq!(heap.entry_words(1), entry(4, Some(pool), 4, 0));
+    assert_eq!(heap.entry_words(2), entry(12, Some(pool + 1), 4, 0));
+    assert_eq!(heap.entry_words(3), entry(16, Some(pool + 2), 0, 77));
 
     let cs = program();
     let (root, pso) = pipeline(device, &cs).expect("a pipeline");
@@ -335,29 +336,29 @@ fn unknown_stride_reads_reach_the_bytes_of_the_view_in_the_slot() {
     // dword 8 (its own slot; its raw view slot goes back to the pool).
     heap.make_at(2, &placed(false, data, structured(20), (1, 4)));
     heap.make_at(3, &placed(false, data, raw, (8, 64)));
-    assert_eq!(heap.entry_words(2), entry(20, Some(pool + 1), 4));
-    assert_eq!(heap.entry_words(3), entry(4, None, 0));
+    assert_eq!(heap.entry_words(2), entry(20, Some(pool + 1), 4, 0));
+    assert_eq!(heap.entry_words(3), entry(4, None, 0, 0));
     let (twenty, plain) = ([106, 111, 116, 121], [109, 110, 111, 112]);
     assert_eq!(run([2, 3]), [twenty, plain].concat()[..]);
 
     // A slot made null reads nothing through its own slot, and the next
     // view to need a raw view takes the slot given back.
     heap.make_null(2);
-    assert_eq!(heap.entry_words(2), [0, 0]);
+    assert_eq!(heap.entry_words(2), [0, 0, 0]);
     assert_eq!(run([2, 3]), [[0; 4], plain].concat()[..]);
     heap.make_at(4, &placed(false, data, structured(16), (1, 2)));
-    assert_eq!(heap.entry_words(4), entry(16, Some(pool + 1), 0));
+    assert_eq!(heap.entry_words(4), entry(16, Some(pool + 1), 0, 0));
     heap.make_at(5, &placed(false, data, structured(8), (2, 2)));
-    assert_eq!(heap.entry_words(5), entry(8, Some(pool + 2), 0));
+    assert_eq!(heap.entry_words(5), entry(8, Some(pool + 2), 0, 0));
 
     // Dynamic slots give their raw views back when their list is done.
     let first = heap.dynamic(2).expect("dynamic slots");
     heap.make_at(first, &placed(false, data, structured(12), (0, 4)));
-    assert_eq!(heap.entry_words(first), entry(12, Some(pool + 3), 0));
+    assert_eq!(heap.entry_words(first), entry(12, Some(pool + 3), 0, 0));
     heap.release(first, 2);
-    assert_eq!(heap.entry_words(first), [0, 0]);
+    assert_eq!(heap.entry_words(first), [0, 0, 0]);
     heap.make_at(6, &placed(false, data, structured(12), (0, 4)));
-    assert_eq!(heap.entry_words(6), entry(12, Some(pool + 3), 0));
+    assert_eq!(heap.entry_words(6), entry(12, Some(pool + 3), 0, 0));
     drop(memory);
 }
 
