@@ -4510,7 +4510,20 @@ impl<'a> Lower<'a> {
                 let d3 = self.s.m.bin(c, Bin::Or, base, last);
                 vec![(1, d1), (2, d2), (3, d3), (4, depth)]
             }
-            None => vec![(2, field(self, 0))],
+            None => {
+                let mut w = vec![(2, field(self, 0))];
+                // Buffer WORD1 carries the stride in bits [29:16]; the console
+                // compiler reads it back to compute addresses. Rebuild it from
+                // the view's stride so a descriptor read as data still gives it.
+                if let Some(u) = self.used_kind(&src) {
+                    let s = u.stride;
+                    if s > 0 && s <= 0x3FFF {
+                        let v = self.s.m.i32(s << 16);
+                        w.push((1, v));
+                    }
+                }
+                w
+            }
         };
         for k in 0..count {
             let rel = k.wrapping_sub(u32::from(first));
