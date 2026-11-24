@@ -2490,6 +2490,15 @@ impl<'a> Lower<'a> {
         if let Some(&why) = self.ballot_fail.get(&lo) {
             return Err(why);
         }
+        self.x.st.masks.get(&lo).ok_or(LANE_MASK)?;
+        if !self.x.st.active.contains(&lo) {
+            if self.mask_data == MaskData::Console
+                && let Some(r) = self.non_active_console_mask(lo, high)?
+            {
+                return Ok(r);
+            }
+            return Err("a lane mask holding lanes elsewhere read as data");
+        }
         let (x, y) = match self.ballots.get(&lo) {
             Some(&xy) => xy,
             None => {
@@ -2555,6 +2564,95 @@ impl<'a> Lower<'a> {
         };
         let z = self.s.m.i32(0);
         Ok(self.s.m.cmp(c, pred::NE, any, z))
+    }
+
+    /// Computes one dword of a non-active console lane mask lazily from its
+    /// defining bitwise scalar operation without emitting `waveActiveBallot`
+    /// in the narrower block (and without touching unused control-flow masks).
+    fn non_active_console_mask(&mut self, lo: Value, high: bool) -> Result<Option<V>, Why> {
+        let Some(&b) = self.def_block.get(&lo) else {
+            return Ok(None);
+        };
+        let Some(inst) = self.x.p.blocks[b]
+            .insts
+            .iter()
+            .find(|i| i.writes.iter().any(|&(_, w)| w == lo))
+        else {
+            return Ok(None);
+        };
+        let Fields::Sop { src, .. } = &inst.fields else {
+            return Ok(None);
+        };
+        let width = if self.x.native.wave64 { "_b64" } else { "_b32" };
+        let Some(op) = inst.name().strip_prefix("s_").and_then(|s| s.strip_suffix(width)) else {
+            return Ok(None);
+        };
+        if !matches!(
+            op,
+            "mov" | "not" | "and" | "or" | "xor" | "andn2" | "orn2" | "nand" | "nor" | "xnor"
+        ) {
+            return Ok(None);
+        }
+        if !self.balloting.insert(lo) {
+            return Err("a lane mask whose lanes depend on its own value");
+        }
+        let h = u8::from(high);
+        let half = |l: &mut Self, k: usize| -> Result<V, Why> {
+            match src.get(k) {
+                Some(&Operand::Scalar { code, .. }) if code != NULL => {
+                    let v = inst.read(Reg::S(code + h)).ok_or("an unread operand")?;
+                    l.i32_of(v)
+                }
+                Some(op) if h == 0 => l.operand(inst, op),
+                Some(Operand::Const(k)) => {
+                    let x = crate::resource::inline(*k).ok_or("a special operand")?;
+                    Ok(l.s.m.i32(if (x as i32) < 0 { u32::MAX } else { 0 }))
+                }
+                _ => Ok(l.s.m.i32(0)),
+            }
+        };
+        let res = (|| {
+            let c = self.cur;
+            let ones = self.s.m.i32(u32::MAX);
+            match op {
+                "mov" => half(self, 0),
+                "not" => {
+                    let a = half(self, 0)?;
+                    Ok(self.s.m.bin(c, Bin::Xor, a, ones))
+                }
+                _ => {
+                    let (a, bb) = (half(self, 0)?, half(self, 1)?);
+                    Ok(match op {
+                        "and" => self.s.m.bin(c, Bin::And, a, bb),
+                        "or" => self.s.m.bin(c, Bin::Or, a, bb),
+                        "xor" => self.s.m.bin(c, Bin::Xor, a, bb),
+                        "andn2" => {
+                            let nb = self.s.m.bin(c, Bin::Xor, bb, ones);
+                            self.s.m.bin(c, Bin::And, a, nb)
+                        }
+                        "orn2" => {
+                            let nb = self.s.m.bin(c, Bin::Xor, bb, ones);
+                            self.s.m.bin(c, Bin::Or, a, nb)
+                        }
+                        "nand" => {
+                            let x = self.s.m.bin(c, Bin::And, a, bb);
+                            self.s.m.bin(c, Bin::Xor, x, ones)
+                        }
+                        "nor" => {
+                            let x = self.s.m.bin(c, Bin::Or, a, bb);
+                            self.s.m.bin(c, Bin::Xor, x, ones)
+                        }
+                        "xnor" => {
+                            let x = self.s.m.bin(c, Bin::Xor, a, bb);
+                            self.s.m.bin(c, Bin::Xor, x, ones)
+                        }
+                        _ => unreachable!(),
+                    })
+                }
+            }
+        })();
+        self.balloting.remove(&lo);
+        res.map(Some)
     }
 
     // ---- operands ----
@@ -9316,6 +9414,27 @@ mod tests {
             err.to_string().contains("constant buffer's descriptor read as data"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn non_active_console_mask_sop_lowers_bitwise() {
+        // Compute shader (wave32): two masks computed under the entry EXEC,
+        // then EXEC is narrowed via v_cmpx, and s_and_b32 combines the two
+        // outer masks before s_bcnt1_i32_b32 reads the result as data.
+        let words = [
+            0x7D84_0300u32, // v_cmp_eq_u32 vcc, v0, v1
+            0xBE80_036A,    // s_mov_b32 s0, vcc
+            0x7D88_0500,    // v_cmp_gt_u32 vcc, v0, v2
+            0xBE81_036A,    // s_mov_b32 s1, vcc
+            0x7DA4_0080,    // v_cmpx_eq_u32 exec, 0, v0
+            0x8702_0100,    // s_and_b32 s2, s0, s1
+            0xBE83_0F02,    // s_bcnt1_i32_b32 s3, s2
+            0x7E00_0203,    // v_mov_b32 v0, s3
+            0xD834_0000,
+            0x0000_0000, // ds_write_b32 v0, v0
+            S_ENDPGM,
+        ];
+        lowers(&words, 0x8001).unwrap();
     }
 
     /// Tables of 2D textures at s0 and samplers at s1.
