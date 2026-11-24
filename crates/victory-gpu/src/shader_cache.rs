@@ -20,14 +20,41 @@ use victory_shader::{HwStage, RootType};
 static CACHE: OnceLock<Cache> = OnceLock::new();
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
+static REFUSALS: OnceLock<PathBuf> = OnceLock::new();
 
 /// Keeps translated shaders in `dir` from now on.
 pub fn use_shader_cache(dir: PathBuf) {
+    let _ = REFUSALS.set(dir.join("refusals"));
     match Cache::open(dir) {
         Ok(cache) => {
             let _ = CACHE.set(cache);
         }
         Err(e) => tracing::warn!(error = %e, "no shader cache"),
+    }
+}
+
+/// Diagnostics (`VICTORY_DUMP_REFUSALS`): the exact container bytes of a
+/// shader that did not translate, once per hash, so the runtime's containers
+/// can be censused offline (`victory translate <dir>`). The runtime patches
+/// root layouts ("Wrapped"), so its failing containers can differ from the
+/// ones in the game's archives.
+pub(crate) fn dump_refused(stage: &str, hash: &str, container: &[u8], error: &str) {
+    if !cfg!(feature = "diagnostics") || std::env::var_os("VICTORY_DUMP_REFUSALS").is_none() {
+        return;
+    }
+    let Some(dir) = REFUSALS.get() else {
+        return;
+    };
+    let path = dir.join(format!("{stage}-{hash}.bin"));
+    if path.exists() {
+        return;
+    }
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    match std::fs::write(&path, container) {
+        Ok(()) => tracing::info!(path = %path.display(), error, "refused shader dumped"),
+        Err(e) => tracing::warn!(error = %e, "refused shader not dumped"),
     }
 }
 

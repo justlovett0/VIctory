@@ -123,6 +123,14 @@ impl Shader {
                         "shader does not translate; its pipelines' draws are dropped"
                     ),
                 }
+                if let Err(e) = &done {
+                    crate::shader_cache::dump_refused(
+                        self.stage,
+                        &self.hash,
+                        &self.container,
+                        &e.to_string(),
+                    );
+                }
                 done.ok()
             })
             .as_ref()

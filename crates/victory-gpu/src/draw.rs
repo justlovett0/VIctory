@@ -361,12 +361,6 @@ impl State {
         if !self.bind(list, p, false) {
             return false;
         }
-<<<<<<< HEAD
-        if !self.bind(list, p, false) {
-            return false;
-        }
-=======
->>>>>>> pr-193-latest
         let l = &list.list;
         // Vertex buffers the input layout reads.
         let mut views = [D3D12_VERTEX_BUFFER_VIEW::default(); 32];
@@ -425,11 +419,8 @@ impl State {
     /// What draws and dispatches share: heaps, our root signature, the
     /// pipeline, and per stage the user data, root views and the
     /// descriptors its tables hold.
-<<<<<<< HEAD
     /// False if the draw or dispatch must not run: a table it reads could
     /// not be made.
-=======
->>>>>>> pr-193-latest
     fn bind(&mut self, list: &HostList, p: &HostPipeline, compute: bool) -> bool {
         let l = &list.list;
         // Heaps first: a root signature with directly indexed heaps must be
@@ -554,7 +545,6 @@ impl State {
             }
         }
         true
-<<<<<<< HEAD
     }
 
     /// Binds the title's root SRV `slot` as the one-view table `param` (see
@@ -619,8 +609,6 @@ impl State {
                 l.SetGraphicsRootDescriptorTable(param, table);
             }
         }
-=======
->>>>>>> pr-193-latest
     }
 
     /// Runs a dispatch on the host.
@@ -646,10 +634,7 @@ impl State {
             return;
         }
         if !self.bind(list, p, true) {
-<<<<<<< HEAD
             DROPPED.fetch_add(1, Ordering::Relaxed);
-=======
->>>>>>> pr-193-latest
             return;
         }
         #[cfg(feature = "diagnostics")]

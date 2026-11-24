@@ -522,7 +522,6 @@ impl HostPipeline {
             }
             bound.push(stage);
         }
-<<<<<<< HEAD
         let (root, root_blob) = match root_signature(&host.device, &params, &samplers, compute.is_some()) {
             Ok(root) => root,
             Err(e) => {
@@ -533,16 +532,6 @@ impl HostPipeline {
         // The debug view's pixel shader, one output per colour target.
         let debug = (compute.is_none() && debug)
             .then(|| victory_shader::emit::debug_ps(g.map_or(1, |g| g.targets.NumRenderTargets)));
-=======
-        let (root, root_blob) =
-            match root_signature(&host.device, &params, &samplers, compute.is_some()) {
-                Ok(root) => root,
-                Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host root signature refused");
-                    return None;
-                }
-            };
->>>>>>> pr-193-latest
         let code = |i: usize| {
             if i == 1
                 && let Some(d) = &debug
