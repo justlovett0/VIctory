@@ -765,7 +765,13 @@ impl State {
             let (Some(host), Some(index)) = (heap.host(), heap.index(end)) else {
                 continue;
             };
-            if index >= host.count() {
+            if index >= host.count()
+                || (u.kind == ResourceType::Srv
+                    && crate::descriptor::view(end)
+                        .as_ref()
+                        .and_then(crate::descriptor::host::unaligned_srv)
+                        .is_some())
+            {
                 fresh.push(u.slot);
             }
         }
@@ -845,9 +851,21 @@ impl State {
                         host.constant_at(index, gpu, size);
                     }
                     Some(view) => {
-                        host.make_at(index, &view);
-                        if let Some(u) = used {
-                            readable(list, u, &view);
+                        if let Some((src, len, align, mut desc)) =
+                            crate::descriptor::host::unaligned_srv(&view)
+                        {
+                            if let Some((buf, at, to)) = list.scratch_aligned(len, align) {
+                                list.defer_fill(to, src as *const u8, len as usize);
+                                desc.Anonymous.Buffer.FirstElement = at / align;
+                                host.srv_at(index, &buf, &desc);
+                            } else {
+                                host.make_null(index);
+                            }
+                        } else {
+                            host.make_at(index, &view);
+                            if let Some(u) = used {
+                                readable(list, u, &view);
+                            }
                         }
                     }
                     None => {

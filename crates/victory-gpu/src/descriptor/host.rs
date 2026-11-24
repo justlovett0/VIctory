@@ -511,6 +511,22 @@ impl HostHeap {
         };
     }
 
+    /// Makes slot `index` (a dynamic one) a shader resource view of `resource`.
+    pub(crate) fn srv_at(
+        &self,
+        index: u32,
+        resource: &ID3D12Resource,
+        desc: &D3D12_SHADER_RESOURCE_VIEW_DESC,
+    ) {
+        let Some(host) = host() else { return };
+        // SAFETY: a live resource and a slot of our heap.
+        unsafe {
+            host.device
+                .CreateShaderResourceView(resource, Some(desc), self.cpu(index))
+        };
+        self.keep(index, Some(resource.clone()));
+    }
+
     fn cpu(&self, index: u32) -> D3D12_CPU_DESCRIPTOR_HANDLE {
         D3D12_CPU_DESCRIPTOR_HANDLE {
             ptr: self.cpu + index as usize * self.step as usize,
@@ -974,6 +990,55 @@ fn unordered_range(base: u64, words: &[u32; 10]) -> Option<(u64, u64)> {
         base + buffer.FirstElement * element,
         u64::from(buffer.NumElements) * element,
     ))
+}
+
+/// If `view` is a buffer SRV whose offset in its shadow buffer is not a
+/// multiple of its element stride (so `FirstElement` cannot address it on the
+/// shared shadow buffer), returns `(title_src, byte_len, element_stride, desc)`
+/// so the caller can copy the elements into an element-aligned scratch buffer.
+pub(crate) fn unaligned_srv(
+    view: &View,
+) -> Option<(u64, u64, u64, D3D12_SHADER_RESOURCE_VIEW_DESC)> {
+    let (address, len, words): (u64, u64, &[u32; 10]) = match view {
+        View::Shader(r, Some(words)) => {
+            if crate::resource::host_resource(*r as crate::object::This).is_some() {
+                return None;
+            }
+            let (data, len) = crate::resource::buffer_bytes(*r as crate::object::This)?;
+            (data as u64, len, words)
+        }
+        View::Placed(false, resource, desc) if resource[0] == 1 => (
+            u64::from(desc[10]) | u64::from(desc[11]) << 32,
+            u64::from(resource[4]) | u64::from(resource[5]) << 32,
+            desc[..10].try_into().ok()?,
+        ),
+        _ => return None,
+    };
+    let mut desc = srv_desc(words);
+    if desc.ViewDimension != D3D12_SRV_DIMENSION_BUFFER {
+        return None;
+    }
+    let element = element_size(&desc);
+    if element == 0 {
+        return None;
+    }
+    let shadow = crate::shadow::find(address, len)?;
+    if shadow.offset(address) % element == 0 {
+        return None;
+    }
+    // SAFETY: checked ViewDimension == BUFFER.
+    let buffer = unsafe { &mut desc.Anonymous.Buffer };
+    let first_bytes = buffer.FirstElement.checked_mul(element)?;
+    let avail = len.saturating_sub(first_bytes);
+    let max_elems = (avail / element).min(u64::from(u32::MAX)) as u32;
+    if buffer.NumElements > max_elems {
+        buffer.NumElements = max_elems;
+    }
+    let bytes = u64::from(buffer.NumElements) * element;
+    if bytes == 0 {
+        return None;
+    }
+    Some((address + first_bytes, bytes, element, desc))
 }
 
 /// The host resource a slot made by [`make`] views, if any.
@@ -1510,5 +1575,43 @@ mod tests {
         heap.release(a, 50);
         assert_eq!(heap.dynamic(50), Some(4));
         assert_eq!(heap.dynamic(40), Some(4 + heap.dynamic - 40));
+    }
+
+    /// A placed structured buffer SRV whose offset in its shadow buffer is not
+    /// a multiple of its stride is flagged for element-aligned copying.
+    #[test]
+    fn unaligned_buffer_srv_is_detected() {
+        if host().is_none() {
+            return; // no host GPU
+        }
+        let start = 0x7000_0000u64;
+        let resource_id = 0xDEAD_BEEF_usize;
+        crate::shadow::register(resource_id, start, 4096);
+
+        let placed = |addr: u64, num_elements: u32, stride: u32| {
+            let mut res = [0u32; 14];
+            res[0] = 1; // BUFFER
+            res[4] = num_elements * stride;
+            let mut desc = [0u32; 16];
+            desc[1] = 1; // D3D12_SRV_DIMENSION_BUFFER
+            desc[2] = 5768; // default component mapping
+            desc[6] = num_elements;
+            desc[7] = stride;
+            desc[10] = addr as u32;
+            desc[11] = (addr >> 32) as u32;
+            View::Placed(false, res, desc)
+        };
+
+        // Offset 112 is a multiple of stride 56 -> aligned on the shadow buffer.
+        assert!(unaligned_srv(&placed(start + 112, 2, 56)).is_none());
+
+        // Offset 16 is not a multiple of stride 56 -> must be copied aligned.
+        let (src, bytes, align, desc) =
+            unaligned_srv(&placed(start + 16, 2, 56)).expect("unaligned");
+        assert_eq!((src, bytes, align), (start + 16, 112, 56));
+        // SAFETY: checked BUFFER dimension.
+        assert_eq!(unsafe { desc.Anonymous.Buffer.NumElements }, 2);
+
+        crate::shadow::unregister(resource_id, start);
     }
 }
