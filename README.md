@@ -8,6 +8,36 @@ the platform underneath it and converts the title's data, ahead of time where
 it can and on first use where it must (shaders). See
 [docs/architecture.md](docs/architecture.md).
 
+## This fork (`justlovett0`, branch `main175`)
+
+An integration branch stacking open community PRs onto upstream `main`
+(`ffe310e`), verified against the real game on **Windows 10 21H2 / NVIDIA RTX
+3080 10 GB / driver 621.24**. Full handoff: [fork-details.md](fork-details.md).
+
+What it adds over upstream `main`:
+
+| Change | PR(s) | Effect |
+|--------|-------|--------|
+| D3D12 Agility SDK loader | #175 | **Required to launch on Windows 10** (in-box D3D12 is SM 6.5); `cargo xtask agility` |
+| World GPU-fault fixes + debug views | #994 | Mirror heap-slot re-sync, bounded root-SRV tables; `VICTORY_DEBUG_PS`, `VICTORY_SHOW_TARGET` |
+| Capped view-heap split | #747 (local) | Keeps the full dynamic pool on NVIDIA's 1M-capped shader-visible heap |
+| Shader translation classes | #302 #193 #704 #309 #953 #1067 #1276 | Spill-table root args, runtime stride + raw aliases, mask spills, scalar/descriptor-as-data, address-not-from-root |
+| Copy-storm fixes | #986 #1260 #1267 | Aligned SRV scratch copies, one copy per range, copy-back each byte once (copies ~400 MB → ~1 MB/frame) |
+| Black-frame trace | #1254 | Keeps the frame-end draws (lighting/composite) for diagnosis |
+| **Wave64 compute emulation** | #189 | **Cures the world-entry GPU hang**: wave64 refusals 119 → 0, world ran ~9 min with 0 device removals (was a ~3.5-min TDR). Auto-selects `Emulate` on wave32 hosts; `VICTORY_WAVE64_EMULATE` overrides |
+| Instruction lowering | #1084 #305 #306 #176 #587 | Untracked-mask lane bit, 64-bit image atomics, biased 16-bit samples + conservative depth, packed fp16 inputs, mesh output bounds (cherry-picked from the #1492 bundle) |
+| Buffer descriptor stride as data | local | Rebuilds GFX10 buffer WORD1 stride (bits [29:16]) when a descriptor is read as data |
+
+Measured: **494/561 compute programs emit** (was ~313/381 before wave64
+emulation); the world is stable and controllable; scene geometry renders in the
+debug G-buffer view. **The final lit image is still black** (lighting/composite
+passes untranslated) and the presented rate is ~1 fps (synchronous submission +
+emulation copy overhead). The remaining frontier is the descriptor
+address/format-as-data class and the lighting passes.
+
+Findings are reported back to the upstream PRs as verified-results comments.
+AI-assisted (Qwen Code); no game files, keys or dumps are committed.
+
 ## Status (2026-11-23)
 
 **Not playable yet.** The title boots, runs its menus at its own 30 fps and
